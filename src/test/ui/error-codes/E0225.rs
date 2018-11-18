@@ -11,8 +11,9 @@
 #![feature(trait_alias)]
 
 trait Foo = std::io::Read + std::io::Write;
+trait Bar = Foo;
 
 fn main() {
     let _: Box<std::io::Read + std::io::Write>;
-    let _: Box<Foo>;
+    let _: Box<Bar>;
 }
