@@ -1,7 +1,7 @@
 error[E0225]: only auto traits can be used as additional traits in a trait object
   --> $DIR/E0225.rs:17:32
    |
-LL |     let _: Box<std::io::Read + std::io::Write>;
+LL |     let _: Box<std::io::Read + std::io::Write>; //~ ERROR E0225
    |                                ^^^^^^^^^^^^^^ non-auto additional trait
 
 error[E0225]: only auto traits can be used as additional traits in a trait object
@@ -12,7 +12,7 @@ LL | trait Foo = std::io::Read + std::io::Write;
 LL | trait Bar = Foo;
    |             --- referenced by this alias
 ...
-LL |     let _: Box<Bar>;
+LL |     let _: Box<Bar>; //~ ERROR E0225
    |                ^^^
 
 error: aborting due to 2 previous errors

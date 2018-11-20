@@ -14,6 +14,6 @@ trait Foo = std::io::Read + std::io::Write;
 trait Bar = Foo;
 
 fn main() {
-    let _: Box<std::io::Read + std::io::Write>;
-    let _: Box<Bar>;
+    let _: Box<std::io::Read + std::io::Write>; //~ ERROR E0225
+    let _: Box<Bar>; //~ ERROR E0225
 }
