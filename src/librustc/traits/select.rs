@@ -38,6 +38,7 @@ use super::{
 };
 
 use dep_graph::{DepKind, DepNodeIndex};
+use hir;
 use hir::def_id::DefId;
 use infer;
 use infer::{InferCtxt, InferOk, TypeFreshener};
@@ -47,8 +48,6 @@ use ty::fast_reject;
 use ty::relate::TypeRelation;
 use ty::subst::{Subst, Substs};
 use ty::{self, ToPolyTraitRef, ToPredicate, Ty, TyCtxt, TypeFoldable};
-
-use hir;
 use rustc_data_structures::bit_set::GrowableBitSet;
 use rustc_data_structures::sync::Lock;
 use rustc_target::spec::abi::Abi;
@@ -1759,7 +1758,8 @@ impl<'cx, 'gcx, 'tcx> SelectionContext<'cx, 'gcx, 'tcx> {
             bounds
         );
 
-        let matching_bound = util::elaborate_predicates(self.tcx(), bounds.predicates)
+        let elaborated_predicates = util::elaborate_predicates(self.tcx(), bounds.predicates);
+        let matching_bound = elaborated_predicates
             .filter_to_traits()
             .find(|bound| {
                 self.probe(|this, _| {

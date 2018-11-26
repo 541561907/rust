@@ -19,22 +19,21 @@ use hir::def_id::DefId;
 use hir::HirVec;
 use middle::resolve_lifetime as rl;
 use namespace::Namespace;
-use rustc::ty::subst::{Kind, Subst, Substs};
 use rustc::traits;
 use rustc::ty::{self, Ty, TyCtxt, ToPredicate, TypeFoldable};
 use rustc::ty::{GenericParamDef, GenericParamDefKind};
+use rustc::ty::subst::{Kind, Subst, Substs};
 use rustc::ty::wf::object_region_bounds;
 use rustc_data_structures::sync::Lrc;
 use rustc_target::spec::abi;
-use std::collections::BTreeSet;
-use std::slice;
 use require_c_abi_if_variadic;
 use util::common::ErrorReported;
 use util::nodemap::FxHashMap;
 use errors::{Applicability, FatalError, DiagnosticId};
 use lint;
-
+use std::collections::BTreeSet;
 use std::iter;
+use std::slice;
 use syntax::ast;
 use syntax::feature_gate::{GateIssue, emit_feature_err};
 use syntax::ptr::P;
@@ -713,7 +712,7 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
         }
     }
 
-    /// The given trait ref must actually be a trait.
+    /// The given trait-ref must actually be a trait.
     pub(super) fn instantiate_poly_trait_ref_inner(&self,
         trait_ref: &hir::TraitRef,
         self_ty: Ty<'tcx>,
@@ -951,7 +950,8 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
     /// Transform a `PolyTraitRef` into a `PolyExistentialTraitRef` by
     /// removing the dummy `Self` type (`TRAIT_OBJECT_DUMMY_SELF`).
     fn trait_ref_to_existential(&self, trait_ref: ty::TraitRef<'tcx>)
-                                -> ty::ExistentialTraitRef<'tcx> {
+                                -> ty::ExistentialTraitRef<'tcx>
+    {
         assert_eq!(trait_ref.self_ty().sty, TRAIT_OBJECT_DUMMY_SELF);
         ty::ExistentialTraitRef::erase_self_ty(self.tcx(), trait_ref)
     }
@@ -972,6 +972,7 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
 
         let mut projection_bounds = Vec::new();
         let dummy_self = tcx.mk_ty(TRAIT_OBJECT_DUMMY_SELF);
+        let mut bound_trait_refs = Vec::with_capacity(trait_bounds.len());
         let (principal, potential_assoc_types) = self.instantiate_poly_trait_ref(
             &trait_bounds[0],
             dummy_self,
@@ -979,22 +980,29 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
         );
         debug!("principal: {:?}", principal);
 
-        for trait_bound in trait_bounds[1..].iter() {
+        for trait_bound in trait_bounds[1..].iter().rev() {
             // sanity check for non-principal trait bounds
-            self.instantiate_poly_trait_ref(trait_bound,
-                                            dummy_self,
-                                            &mut vec![]);
+            let (tr, _) = self.instantiate_poly_trait_ref(trait_bound,
+                                                          dummy_self,
+                                                          &mut Vec::new());
+            bound_trait_refs.push((tr, trait_bound.span));
         }
+        bound_trait_refs.push((principal, trait_bounds[0].span));
 
-        let (mut auto_traits, trait_bounds) = split_auto_traits(tcx, &trait_bounds[1..]);
-
-        if !trait_bounds.is_empty() {
-            let b = &trait_bounds[0];
-            let span = b.trait_ref.path.span;
-            struct_span_err!(self.tcx().sess, span, E0225,
-                "only auto traits can be used as additional traits in a trait object")
-                .span_label(span, "non-auto additional trait")
-                .emit();
+        let expanded_traits = traits::expand_trait_refs(tcx, bound_trait_refs);
+        let (auto_traits, regular_traits): (Vec<_>, Vec<_>) =
+            expanded_traits.partition(|i| tcx.trait_is_auto(i.trait_ref().def_id()));
+        if regular_traits.len() > 1 {
+            let extra_trait = &regular_traits[1];
+            let mut err = struct_span_err!(tcx.sess, extra_trait.bottom().1, E0225,
+                "only auto traits can be used as additional traits in a trait object");
+            err.span_label(extra_trait.top().1, "non-auto additional trait");
+            if extra_trait.items.len() > 2 {
+                for (_, sp) in extra_trait.items[1..(extra_trait.items.len() - 1)].iter().rev() {
+                    err.span_label(*sp, "referenced by this alias");
+                }
+            }
+            err.emit();
         }
 
         // Check that there are no gross object safety violations;
@@ -1053,11 +1061,11 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
             let mut potential_assoc_types_spans = vec![];
             if let Some(potential_assoc_types) = potential_assoc_types {
                 if potential_assoc_types.len() == associated_types.len() {
-                    // Only suggest when the amount of missing associated types is equals to the
+                    // Only suggest when the number of missing associated types equals the number of
                     // extra type arguments present, as that gives us a relatively high confidence
                     // that the user forgot to give the associtated type's name. The canonical
                     // example would be trying to use `Iterator<isize>` instead of
-                    // `Iterator<Item=isize>`.
+                    // `Iterator<Item = isize>`.
                     suggest = true;
                     potential_assoc_types_spans = potential_assoc_types;
                 }
@@ -1116,11 +1124,23 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
             })
         });
 
-        // Dedup auto traits so that `dyn Trait + Send + Send` is the same as `dyn Trait + Send`.
+        // Dedup auto traits so that e.g. `dyn Trait + Send + Send` is the same as
+        // `dyn Trait + Send`. Skip the first auto trait if it is the principal trait.
+        let auto_traits_start_index =
+            if auto_traits.first().map_or(false, |i| i.trait_ref() == &principal) {
+                1
+            } else {
+                0
+            };
+        let mut auto_traits: Vec<_> =
+            auto_traits[auto_traits_start_index..].into_iter()
+                                                  .map(|i| i.trait_ref().def_id())
+                                                  .collect();
         auto_traits.sort();
         auto_traits.dedup();
+        debug!("auto_traits: {:?}", auto_traits);
 
-        // Calling `skip_binder` is okay, because the predicates are re-bound.
+        // Calling `skip_binder` is okay, since the predicates are re-bound.
         let mut v =
             iter::once(ty::ExistentialPredicate::Trait(*existential_principal.skip_binder()))
             .chain(auto_traits.into_iter().map(ty::ExistentialPredicate::AutoTrait))
@@ -1785,33 +1805,6 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
         }
         return Some(r);
     }
-}
-
-/// Divides a list of general trait bounds into two groups: auto traits (e.g. Sync and Send) and the
-/// remaining general trait bounds.
-fn split_auto_traits<'a, 'b, 'gcx, 'tcx>(tcx: TyCtxt<'a, 'gcx, 'tcx>,
-                                         trait_bounds: &'b [hir::PolyTraitRef])
-    -> (Vec<DefId>, Vec<&'b hir::PolyTraitRef>)
-{
-    let (auto_traits, trait_bounds): (Vec<_>, _) = trait_bounds.iter().partition(|bound| {
-        // Checks whether `trait_did` is an auto trait and adds it to `auto_traits` if so.
-        match bound.trait_ref.path.def {
-            Def::Trait(trait_did) if tcx.trait_is_auto(trait_did) => {
-                true
-            }
-            _ => false
-        }
-    });
-
-    let auto_traits = auto_traits.into_iter().map(|tr| {
-        if let Def::Trait(trait_did) = tr.trait_ref.path.def {
-            trait_did
-        } else {
-            unreachable!()
-        }
-    }).collect::<Vec<_>>();
-
-    (auto_traits, trait_bounds)
 }
 
 // A helper struct for conveniently grouping a set of bounds which we pass to
